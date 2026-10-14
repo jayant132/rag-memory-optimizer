@@ -236,5 +236,3 @@ This is a proof of concept on a small corpus. It shows the pipeline works end to
 - `retrieval_precision_score` is a heuristic, not a labeled metric.
 - Token counts are estimated, not tokenizer-exact.
 - Requires a local Ollama instance for embeddings.
-
-**Jayant**: [GitHub](https://github.com/jayant132) · [LinkedIn](https://www.linkedin.com/in/your-profile)
