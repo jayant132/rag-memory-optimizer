@@ -237,6 +237,4 @@ This is a proof of concept on a small corpus. It shows the pipeline works end to
 - Token counts are estimated, not tokenizer-exact.
 - Requires a local Ollama instance for embeddings.
 
-## Author
-
 **Jayant**: [GitHub](https://github.com/jayant132) · [LinkedIn](https://www.linkedin.com/in/your-profile)
