@@ -1,17 +1,8 @@
 # rag-memory-optimizer
 
-**A memory-efficient, token-budgeted RAG backend.**
-Qdrant HNSW + 8-bit scalar quantization → cross-encoder reranking → hard token-budget context packing.
+> A memory-efficient, token-budgeted RAG backend: Qdrant HNSW + 8-bit scalar quantization, cross-encoder reranking, and hard token-budget context packing.
 
-![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-async-009688?logo=fastapi&logoColor=white)
-![Qdrant](https://img.shields.io/badge/Qdrant-HNSW%20%2B%20SQ8-DC244C)
-![Ollama](https://img.shields.io/badge/Embeddings-Ollama-000000)
-![Reranker](https://img.shields.io/badge/Reranker-bge--reranker--base-FFB000)
-
-[Overview](#overview) · [Architecture](#architecture) · [Quick Start](#quick-start) · [API](#api-reference) · [Design Decisions](#design-decisions) · [Limitations](#limitations--roadmap)
-
-</div>
+**Stack:** Python · FastAPI · Qdrant · Ollama · sentence-transformers
 
 ---
 
@@ -19,91 +10,91 @@ Qdrant HNSW + 8-bit scalar quantization → cross-encoder reranking → hard tok
 
 Most RAG demos work on five documents. At real scale, three things hurt first:
 
-| Problem | What goes wrong | How this project addresses it |
+| Problem | What goes wrong | How this project handles it |
 |---|---|---|
-| **Vector RAM cost** | `float32` embeddings are expensive to hold in memory | HNSW index with **int8 scalar quantization (SQ8)**: ~4x smaller vectors in RAM |
-| **Noisy retrieval** | Embedding similarity alone returns loosely related chunks | **Cross-encoder reranking** re-scores each query-chunk pair |
-| **Token spend** | Dumping every candidate into the prompt inflates cost and dilutes context | **Token-budget packer** fits the best chunks under a hard limit |
+| Vector RAM cost | `float32` embeddings are expensive to keep in memory | HNSW index with int8 scalar quantization (SQ8), ~4x smaller vectors in RAM |
+| Noisy retrieval | Embedding similarity alone returns loosely related chunks | Cross-encoder reranking scores each query-chunk pair |
+| Token spend | Dumping every candidate into the prompt inflates cost | Token-budget packer fits the best chunks under a hard limit |
 
-Every response also returns **telemetry** (candidates evaluated, chunks packed, tokens used vs. budget) so the pipeline's behavior is visible per request.
+Every response also returns telemetry (candidates evaluated, chunks packed, tokens used vs. budget).
 
 ---
 
 ## Architecture
 
-<p align="center">
-  <img src="docs/architecture.png" alt="rag-memory-optimizer architecture diagram" width="720">
-</p>
+```text
+INGESTION (offline)
 
-### Ingestion (offline)
+  Markdown docs --> Recursive chunker --> Async embedder --> Qdrant
+  data/sample_docs  structure-aware       Ollama             HNSW + SQ8
+                                          nomic-embed-text   int8 in RAM
+                                                             float32 on disk
 
-```mermaid
-flowchart LR
-    A["Markdown docs<br/>data/sample_docs"] --> B["Recursive chunker<br/>structure-aware"]
-    B --> C["Async embedder<br/>Ollama · nomic-embed-text"]
-    C --> D[("Qdrant<br/>HNSW + SQ8")]
+
+QUERY (online)  POST /query
+
+  User query
+      |
+      v
+  1. Embed query ............ Ollama, nomic-embed-text (768-d)
+      |
+      v
+  2. Dense ANN search ....... Qdrant HNSW over int8 vectors  -> top_k_candidates
+      |
+      v
+  3. Cross-encoder rerank ... BAAI/bge-reranker-base         -> final_top_k
+      |
+      v
+  4. Token-budget packing ... fill context up to max_token_budget
+      |
+      v
+  5. JSON response .......... packed_context + sources + telemetry
 ```
 
-### Query (online, `POST /query`)
-
-```mermaid
-flowchart LR
-    Q["User query"] --> E["1. Embed query<br/>Ollama"]
-    E --> S["2. Dense ANN search<br/>Qdrant · HNSW over int8"]
-    S --> R["3. Cross-encoder rerank<br/>bge-reranker-base"]
-    R --> P["4. Token-budget packing"]
-    P --> O["5. JSON response<br/>context + sources + telemetry"]
-```
-
-| Step | Component | Responsibility |
+| Step | File | Responsibility |
 |---|---|---|
-| 1 | `embedder.py` | Embeds the query asynchronously via Ollama (`nomic-embed-text`, 768-d) |
-| 2 | `vector_store.py` | Qdrant ANN search over the quantized HNSW index, returns `top_k_candidates` |
-| 3 | `rerank.py` | `BAAI/bge-reranker-base` re-scores candidates, keeps `final_top_k` |
-| 4 | `rerank.py` | Packs chunks in rank order until `max_token_budget` is reached |
-| 5 | `evaluator.py` | Computes telemetry and assembles the response |
+| 1 | `src/ingestion/embedder.py` | Async query embedding via Ollama |
+| 2 | `src/retrieval/vector_store.py` | Qdrant search over the quantized HNSW index |
+| 3 | `src/retrieval/rerank.py` | Cross-encoder re-scoring, keeps top results |
+| 4 | `src/retrieval/rerank.py` | Packs chunks in rank order until the budget is hit |
+| 5 | `src/evaluation/evaluator.py` | Computes telemetry for the response |
 
 ---
 
 ## Design Decisions
 
-### 1. Memory: HNSW + SQ8, tiered storage
+### Memory: HNSW + SQ8
 
-- **HNSW** gives approximate nearest-neighbor search instead of an O(N) exact scan.
-- **SQ8** stores each dimension as `int8` instead of `float32`:
+HNSW gives approximate nearest-neighbor search instead of an O(N) exact scan. SQ8 stores each dimension as `int8` instead of `float32`:
 
 | | Per vector (768-d) | 1M vectors |
 |---|---|---|
 | `float32` | 3,072 B | ~3.1 GB |
 | `int8` (SQ8) | 768 B | ~0.77 GB |
 
-- **Tiering:** quantized vectors stay in RAM (`always_ram=True`) for fast graph traversal; original `float32` vectors are kept on disk (`on_disk=True`).
-- **Trade-off:** quantization can reduce recall slightly. This is a known cost of SQ8 and the reason a benchmark is on the roadmap.
+Quantized vectors stay in RAM (`always_ram=True`) for fast graph traversal, and the original `float32` vectors are kept on disk (`on_disk=True`). Trade-off: quantization can slightly reduce recall, which is why a benchmark is on the roadmap.
 
-### 2. Precision: two-stage retrieval
+### Precision: two-stage retrieval
 
-Fast bi-encoder search casts a wide net; a slower cross-encoder then scores each query-chunk pair jointly. The extra compute is spent only on a small candidate set, which keeps latency bounded while improving relevance.
+Fast vector search casts a wide net, then a slower cross-encoder scores each query-chunk pair jointly. The extra compute runs only on a small candidate set, so latency stays bounded.
 
-### 3. Cost: hard token budget
+### Cost: hard token budget
 
-Chunks are packed in rank order and the loop stops at `max_token_budget`, so prompt size is predictable regardless of how many candidates were retrieved. Token count is estimated at ~4 characters per token (a fast heuristic, not a tokenizer-exact count).
+Chunks are packed in rank order and packing stops at `max_token_budget`, so prompt size stays predictable. Token count is estimated at ~4 characters per token (a heuristic, not tokenizer-exact).
 
-### 4. Concurrency
+### Concurrency
 
-Async FastAPI with `httpx` and `asyncio.gather` keeps embedding calls non-blocking during ingestion and querying.
+Async FastAPI with `httpx` and `asyncio.gather` keeps embedding calls non-blocking.
 
 ---
 
 ## Quick Start
 
-### Prerequisites
+**Prerequisites:** Python 3.10+, [Ollama](https://ollama.com) running locally, and a Qdrant Cloud cluster (or a local Qdrant instance).
 
-- Python 3.10+
-- [Ollama](https://ollama.com) running locally, with the embedding model pulled:
-  ```bash
-  ollama pull nomic-embed-text
-  ```
-- A [Qdrant Cloud](https://cloud.qdrant.io) cluster (or a local Qdrant instance)
+```bash
+ollama pull nomic-embed-text
+```
 
 ### 1. Install
 
@@ -143,7 +134,7 @@ export PYTHONPATH=$PYTHONPATH:.
 ./venv/bin/python -m uvicorn src.api.main:app --port 8000
 ```
 
-Interactive docs are available at **http://localhost:8000/docs**.
+Interactive docs: http://localhost:8000/docs
 
 ---
 
@@ -151,11 +142,9 @@ Interactive docs are available at **http://localhost:8000/docs**.
 
 ### `GET /system/status`
 
-Liveness check. Returns service name, vector store, and reranker model.
+Liveness check. Returns the service name, vector store, and reranker model.
 
 ### `POST /query`
-
-**Request**
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -175,7 +164,7 @@ curl -X POST http://localhost:8000/query \
   }'
 ```
 
-**Response** (from a real run)
+Example response (from a real run, context shortened):
 
 ```json
 {
@@ -187,7 +176,7 @@ curl -X POST http://localhost:8000/query \
     "token_budget_limit": 500,
     "retrieval_precision_score": 0.01045
   },
-  "packed_context": "## 1. Data Governance & Storage\n1.1 All proprietary source code, customer records, and financial projections must remain strictly within approved company cloud environments.\n1.2 Local caching of unencrypted enterprise data on personal devices (BYOD) is strictly prohibited ...",
+  "packed_context": "## 1. Data Governance & Storage\n1.1 All proprietary source code ... must remain strictly within approved company cloud environments.\n1.2 Local caching of unencrypted enterprise data on personal devices (BYOD) is strictly prohibited ...",
   "retrieved_sources": [
     "data/sample_docs/enterprise_security_policy.md",
     "data/sample_docs/enterprise_security_policy.md"
@@ -195,15 +184,13 @@ curl -X POST http://localhost:8000/query \
 }
 ```
 
-**Telemetry fields**
-
-| Field | Meaning |
+| Telemetry field | Meaning |
 |---|---|
 | `candidates_evaluated` | Chunks returned by the vector search |
 | `final_chunks_packed` | Chunks kept after reranking |
-| `estimated_input_tokens` | Approximate tokens in `packed_context` (~chars / 4) |
-| `token_budget_limit` | The `max_token_budget` requested |
-| `retrieval_precision_score` | Mean raw cross-encoder score of the kept chunks. This is a heuristic relevance signal, **not** labeled precision, and its scale depends on the reranker's output range |
+| `estimated_input_tokens` | Approximate tokens in `packed_context` (chars / 4) |
+| `token_budget_limit` | The requested `max_token_budget` |
+| `retrieval_precision_score` | Mean raw cross-encoder score of kept chunks. A heuristic relevance signal, not labeled precision; its scale depends on the reranker output range |
 
 ---
 
@@ -215,11 +202,9 @@ rag-memory-optimizer/
 │   └── settings.yaml        # System parameters
 ├── data/
 │   └── sample_docs/         # Source documents (markdown)
-├── docs/
-│   └── architecture.png     # Architecture diagram used in this README
 ├── src/
 │   ├── api/
-│   │   └── main.py          # FastAPI app, /query pipeline orchestration
+│   │   └── main.py          # FastAPI app and /query pipeline
 │   ├── core/
 │   │   └── config.py        # Environment configuration
 │   ├── evaluation/
@@ -240,31 +225,18 @@ rag-memory-optimizer/
 
 ---
 
-## Tech Stack
-
-| Layer | Technology |
-|---|---|
-| API | FastAPI, Pydantic, Uvicorn |
-| Vector database | Qdrant (HNSW, scalar quantization) |
-| Embeddings | Ollama, `nomic-embed-text` (768-d) |
-| Reranking | `BAAI/bge-reranker-base` via `sentence-transformers` |
-| Async I/O | `httpx`, `asyncio` |
-| Chunking | `langchain-text-splitters` |
-
----
-
 ## Limitations & Roadmap
 
-This is a proof of concept built on a small corpus, so results here demonstrate that the pipeline works end to end, not production-scale performance.
+This is a proof of concept on a small corpus. It shows the pipeline works end to end, not production-scale performance.
 
 **Current limitations**
 
-- Evaluated on a single small policy document; no large-corpus benchmark yet.
-- Memory savings (~4x) are from the data-type math of SQ8, not a measured benchmark; recall impact is not yet quantified.
+- Tested on a single small policy document; no large-corpus benchmark yet.
+- The ~4x memory saving comes from SQ8 data-type math, not a measured benchmark; recall impact is not yet quantified.
 - `retrieval_precision_score` is a heuristic, not a labeled metric.
 - Token counts are estimated, not tokenizer-exact.
 - Requires a local Ollama instance for embeddings.
 
-**Jayant** · [GitHub](https://github.com/jayant132) · [LinkedIn](https://www.linkedin.com/in/your-profile)
+## Author
 
-If you found this useful, a ⭐ on the repo is appreciated.
+**Jayant**: [GitHub](https://github.com/jayant132) · [LinkedIn](https://www.linkedin.com/in/your-profile)
