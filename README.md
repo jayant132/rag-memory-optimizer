@@ -31,7 +31,9 @@ Every response also returns **telemetry** (candidates evaluated, chunks packed, 
 
 ## Architecture
 
-![Architecture diagram](docs/rag-memory-optimizer-architecture.png)
+<p align="center">
+  <img src="docs/architecture.png" alt="rag-memory-optimizer architecture diagram" width="720">
+</p>
 
 ### Ingestion (offline)
 
@@ -214,7 +216,7 @@ rag-memory-optimizer/
 ├── data/
 │   └── sample_docs/         # Source documents (markdown)
 ├── docs/
-│   └── rag-memory-optimizer-architecture.png
+│   └── architecture.png     # Architecture diagram used in this README
 ├── src/
 │   ├── api/
 │   │   └── main.py          # FastAPI app, /query pipeline orchestration
@@ -262,3 +264,7 @@ This is a proof of concept built on a small corpus, so results here demonstrate 
 - `retrieval_precision_score` is a heuristic, not a labeled metric.
 - Token counts are estimated, not tokenizer-exact.
 - Requires a local Ollama instance for embeddings.
+
+**Jayant** · [GitHub](https://github.com/jayant132) · [LinkedIn](https://www.linkedin.com/in/your-profile)
+
+If you found this useful, a ⭐ on the repo is appreciated.
